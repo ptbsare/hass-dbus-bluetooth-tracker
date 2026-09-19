@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -24,9 +25,27 @@ from .const import (
     DEFAULT_SEEN_INTERVAL,
     DOMAIN,
 )
-from .scanner import DBusBluetoothScanner
+from .scanner import DBusBluetoothScanner, clean_mac_list
 
 _LOGGER = logging.getLogger(__name__)
+
+# Regex to extract MAC addresses from any text (handles glued/split formats)
+_MAC_RE = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
+
+
+def _parse_macs(raw: str) -> list[str]:
+    """Parse a raw string into a list of uppercase MAC addresses."""
+    # First, split on common separators
+    parts = raw.replace("\n", ",").split(",")
+    result: list[str] = []
+    for part in parts:
+        matches = _MAC_RE.findall(part)
+        if matches:
+            result.extend(m.upper() for m in matches)
+        elif part.strip():
+            # Might be a malformed entry, keep it as-is (clean_mac_list will filter)
+            result.append(part.strip().upper())
+    return result
 
 
 class DBusBluetoothTrackerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -74,20 +93,7 @@ class DBusBluetoothTrackerOptionsFlowHandler(config_entries.OptionsFlow):
         """Manage the options."""
         if user_input is not None:
             macs_raw = user_input.get(CONF_TRACKED_MACS, "")
-            # Step 1: split on common separators
-            parts = macs_raw.replace("\n", ",").split(",")
-            # Step 2: split each part further if multiple MACs are glued together
-            # e.g. "B8:EA:98:83:06:69FC:5B:8C:44:84:19" -> two separate MACs
-            import re
-            mac_pattern = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
-            macs_list = []
-            for part in parts:
-                matches = mac_pattern.findall(part)
-                if matches:
-                    macs_list.extend(m.upper() for m in matches)
-                elif part.strip():
-                    cleaned = part.strip().upper()
-                    macs_list.append(cleaned)
+            macs_list = clean_mac_list(macs_raw)
 
             return self.async_create_entry(
                 title="",
@@ -103,6 +109,10 @@ class DBusBluetoothTrackerOptionsFlowHandler(config_entries.OptionsFlow):
         current_macs = self.config_entry.options.get(
             CONF_TRACKED_MACS, self.config_entry.data.get(CONF_TRACKED_MACS, [])
         )
+        # Robustly parse: handle both list-of-strings and glued strings
+        all_text = "\n".join(str(m) for m in current_macs)
+        display_macs = clean_mac_list(all_text)
+
         current_interval = self.config_entry.options.get(
             CONF_INTERVAL, self.config_entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL)
         )
@@ -118,7 +128,7 @@ class DBusBluetoothTrackerOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_ADAPTER, self.config_entry.data.get(CONF_ADAPTER, DEFAULT_ADAPTER)
         )
 
-        macs_str = "\n".join(current_macs)
+        macs_str = "\n".join(display_macs)
 
         scanner = DBusBluetoothScanner(self.hass)
         system_adapters = await scanner.async_list_system_adapters()
