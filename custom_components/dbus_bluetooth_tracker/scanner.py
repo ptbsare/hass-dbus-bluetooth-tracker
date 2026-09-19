@@ -26,6 +26,16 @@ DBUS_SOCKET_CANDIDATES = [
     "/run/dbus/system_bus_socket",
 ]
 
+# RSSI values that BlueZ reports as "unknown / not measurable"
+_INVALID_RSSI = (None, 0x7FFF, 32767, -127, 127)
+
+
+def _is_valid_rssi(value: Any) -> bool:
+    """Return True if the RSSI value looks like a real measurement."""
+    if value in _INVALID_RSSI:
+        return False
+    return isinstance(value, (int, float)) and -120 <= value <= -10
+
 
 def resolve_dbus_address(custom_address: str | None = None) -> str | None:
     """Resolve a usable D-Bus system bus address."""
@@ -50,14 +60,12 @@ class DBusBluetoothScanner:
         address = resolve_dbus_address(self._dbus_address)
         if address:
             try:
-                bus = await MessageBus(bus_type=BusType.SYSTEM, bus_address=address).connect()
-                return bus
+                return await MessageBus(bus_type=BusType.SYSTEM, bus_address=address).connect()
             except Exception as err:
                 _LOGGER.error("Failed to connect to system D-Bus at '%s': %s", address, err)
                 raise
         try:
-            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-            return bus
+            return await MessageBus(bus_type=BusType.SYSTEM).connect()
         except Exception as err:
             _LOGGER.error("Failed to connect to system D-Bus: %s", err)
             raise
@@ -75,7 +83,7 @@ class DBusBluetoothScanner:
         for path, interfaces in res.body[0].items():
             if ADAPTER_INTERFACE in interfaces:
                 adapters.append(path.rsplit("/", 1)[-1])
-        
+
         target = (selected_adapter or DEFAULT_ADAPTER).strip().lower()
         if target and target != DEFAULT_ADAPTER:
             if target in adapters:
@@ -95,16 +103,20 @@ class DBusBluetoothScanner:
             bus.disconnect()
             await bus.wait_for_disconnect()
 
-    async def poll_devices(self, macs: list[str], adapter: str = DEFAULT_ADAPTER) -> dict[str, dict[str, Any]]:
+    async def poll_devices(
+        self, macs: list[str], adapter: str = DEFAULT_ADAPTER
+    ) -> dict[str, dict[str, Any]]:
+        """Poll the live BlueZ ObjectManager cache for the given MACs.
+
+        Returns: {mac: {"reachable": bool, "rssi": int|None, "name": str|None}}
         """
-        Hybrid Polling Method:
-        Polls the live BlueZ ObjectManager cache. When a device is within BLE range
-        and detected by the adapter, BlueZ will report it here with a live RSSI value.
-        """
-        results: dict[str, dict[str, Any]] = {mac.lower(): {"reachable": False, "rssi": None} for mac in macs}
+        results: dict[str, dict[str, Any]] = {
+            mac.lower(): {"reachable": False, "rssi": None, "name": None}
+            for mac in macs
+        }
         if not macs:
             return results
-            
+
         try:
             bus = await self._connect()
         except Exception as err:
@@ -118,14 +130,14 @@ class DBusBluetoothScanner:
 
             for adp in adapters:
                 adapter_path = f"{BLUEZ_PATH}/{adp}"
-                # Ensure adapter is actively scanning so BlueZ caches devices
                 try:
                     await bus.call(Message(destination=BLUEZ_SERVICE, interface=ADAPTER_INTERFACE, path=adapter_path, member="StartDiscovery"))
-                    _LOGGER.debug("Ensuring discovery is active on %s", adp)
                 except Exception as err:
-                    _LOGGER.debug("Could not start discovery on %s (may be active already): %s", adp, err)
+                    _LOGGER.debug("StartDiscovery on %s failed (may already be active): %s", adp, err)
 
-            # Fetch the full object tree from BlueZ (it automatically caches devices as they broadcast)
+            # Give BlueZ a moment to refresh cached devices / RSSI values
+            await asyncio.sleep(1.5)
+
             try:
                 res = await bus.call(Message(destination=BLUEZ_SERVICE, path="/", interface="org.freedesktop.DBus.ObjectManager", member="GetManagedObjects"))
             except Exception as err:
@@ -139,43 +151,52 @@ class DBusBluetoothScanner:
             for path, interfaces in objects.items():
                 if DEVICE_INTERFACE not in interfaces:
                     continue
-                
-                props = interfaces[DEVICE_INTERFACE]
-                
-                # Read the live state
-                connected_var = props.get("Connected")
-                connected = connected_var.value if isinstance(connected_var, Variant) else connected_var
-                
-                rssi_var = props.get("RSSI")
-                rssi = rssi_var.value if isinstance(rssi_var, Variant) else rssi_var
-                
-                address_var = props.get("Address", "")
-                address = address_var.value if isinstance(address_var, Variant) else address_var
-                
-                alias_var = props.get("Alias", "")
-                alias = alias_var.value if isinstance(alias_var, Variant) else alias_var
 
-                name_var = props.get("Name", "")
-                name = name_var.value if isinstance(name_var, Variant) else name_var
+                props = interfaces[DEVICE_INTERFACE]
+
+                def _get(name: str) -> Any:
+                    val = props.get(name)
+                    return val.value if isinstance(val, Variant) else val
+
+                address = _get("Address")
+                rssi = _get("RSSI")
+                alias = _get("Alias")
+                name = _get("Name")
 
                 if not isinstance(address, str) or not address:
                     continue
-                
-                # If the BlueZ object exists and is being tracked, the device is physically in range!
-                # We don't even need it to be actively "Connected" in the Bluetooth sense to be "Home"
-                if address.lower() in results:
-                    results[address.lower()]["reachable"] = True
-                    results[address.lower()]["rssi"] = rssi
-                    results[address.lower()]["name"] = name or alias or address
-                    _LOGGER.debug("Device %s found in cache via %s (RSSI: %s, Connected: %s)", address, adp, rssi, connected)
+
+                key = address.lower()
+                if key not in results:
+                    continue
+
+                results[key]["reachable"] = True
+                results[key]["name"] = name or alias or address
+                if _is_valid_rssi(rssi):
+                    results[key]["rssi"] = rssi
+                _LOGGER.debug(
+                    "BlueZ cache: %s found (rssi=%s, connected_name=%s)",
+                    address, rssi, name or alias,
+                )
         finally:
             bus.disconnect()
             await bus.wait_for_disconnect()
 
+        for mac, data in results.items():
+            _LOGGER.debug(
+                "poll_devices result %s: reachable=%s rssi=%s name=%s",
+                mac, data["reachable"], data["rssi"], data["name"],
+            )
         return results
 
-    async def discover_nearby(self, timeout: int = 10) -> list[dict[str, Any]]:
-        """Discover nearby Bluetooth devices via BlueZ D-Bus."""
+    async def discover_nearby(
+        self, timeout: int = 10, adapter: str = DEFAULT_ADAPTER
+    ) -> list[dict[str, Any]]:
+        """Actively scan nearby Bluetooth devices via BlueZ D-Bus.
+
+        The `timeout` parameter controls how many seconds the adapter is put
+        into discovery mode before the results are read back.
+        """
         devices: list[dict[str, Any]] = []
         try:
             bus = await self._connect()
@@ -183,7 +204,8 @@ class DBusBluetoothScanner:
             return devices
 
         try:
-            adapters = await self._get_adapters(bus)
+            adapters = await self._get_adapters(bus, selected_adapter=adapter)
+            _LOGGER.debug("discover_nearby on adapters %s for %ss", adapters, timeout)
             if not adapters:
                 return devices
 
@@ -191,9 +213,11 @@ class DBusBluetoothScanner:
                 adapter_path = f"{BLUEZ_PATH}/{adp}"
                 try:
                     await bus.call(Message(destination=BLUEZ_SERVICE, interface=ADAPTER_INTERFACE, path=adapter_path, member="StartDiscovery"))
-                except Exception:
-                    pass
+                    _LOGGER.debug("StartDiscovery on %s", adp)
+                except Exception as err:
+                    _LOGGER.debug("StartDiscovery on %s failed: %s", adp, err)
 
+                _LOGGER.debug("Scanning %s for %s seconds...", adp, timeout)
                 await asyncio.sleep(timeout)
 
                 try:
@@ -213,24 +237,23 @@ class DBusBluetoothScanner:
                     if DEVICE_INTERFACE not in interfaces:
                         continue
                     props = interfaces[DEVICE_INTERFACE]
-                    address_var = props.get("Address", "")
-                    address = address_var.value if isinstance(address_var, Variant) else address_var
+
+                    def _get(name: str) -> Any:
+                        val = props.get(name)
+                        return val.value if isinstance(val, Variant) else val
+
+                    address = _get("Address")
                     if not isinstance(address, str) or not address:
                         continue
 
-                    name_var = props.get("Name", "")
-                    name = name_var.value if isinstance(name_var, Variant) else name_var
-
-                    alias_var = props.get("Alias", "")
-                    alias = alias_var.value if isinstance(alias_var, Variant) else alias_var
-
-                    rssi_var = props.get("RSSI")
-                    rssi = rssi_var.value if isinstance(rssi_var, Variant) else rssi_var
+                    name = _get("Name")
+                    alias = _get("Alias")
+                    rssi = _get("RSSI")
 
                     devices.append({
                         "name": name or alias or address,
                         "mac": address,
-                        "rssi": rssi,
+                        "rssi": rssi if _is_valid_rssi(rssi) else None,
                         "adapter": adp,
                     })
         finally:

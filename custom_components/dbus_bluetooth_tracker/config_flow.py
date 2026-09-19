@@ -16,10 +16,12 @@ from .const import (
     CONF_ADAPTER,
     CONF_CONSIDER_HOME,
     CONF_INTERVAL,
+    CONF_SEEN_INTERVAL,
     CONF_TRACKED_MACS,
     DEFAULT_ADAPTER,
     DEFAULT_CONSIDER_HOME,
     DEFAULT_INTERVAL,
+    DEFAULT_SEEN_INTERVAL,
     DOMAIN,
 )
 from .scanner import DBusBluetoothScanner
@@ -36,7 +38,6 @@ class DBusBluetoothTrackerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle the initial step."""
-        # Only allow a single instance of this integration
         if self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")
 
@@ -47,6 +48,7 @@ class DBusBluetoothTrackerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 options={
                     CONF_TRACKED_MACS: [],
                     CONF_INTERVAL: DEFAULT_INTERVAL,
+                    CONF_SEEN_INTERVAL: DEFAULT_SEEN_INTERVAL,
                     CONF_CONSIDER_HOME: DEFAULT_CONSIDER_HOME,
                     CONF_ADAPTER: DEFAULT_ADAPTER,
                 },
@@ -71,7 +73,6 @@ class DBusBluetoothTrackerOptionsFlowHandler(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Manage the options."""
         if user_input is not None:
-            # Parse the string containing MACs back into a list of strings
             macs_raw = user_input.get(CONF_TRACKED_MACS, "")
             macs_list = []
             for item in macs_raw.replace("\n", ",").split(","):
@@ -84,17 +85,21 @@ class DBusBluetoothTrackerOptionsFlowHandler(config_entries.OptionsFlow):
                 data={
                     CONF_TRACKED_MACS: macs_list,
                     CONF_INTERVAL: user_input[CONF_INTERVAL],
+                    CONF_SEEN_INTERVAL: user_input[CONF_SEEN_INTERVAL],
                     CONF_CONSIDER_HOME: user_input[CONF_CONSIDER_HOME],
                     CONF_ADAPTER: user_input[CONF_ADAPTER],
                 },
             )
 
-        # Get existing options via self.config_entry (inherited property)
         current_macs = self.config_entry.options.get(
             CONF_TRACKED_MACS, self.config_entry.data.get(CONF_TRACKED_MACS, [])
         )
         current_interval = self.config_entry.options.get(
             CONF_INTERVAL, self.config_entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL)
+        )
+        current_seen_interval = self.config_entry.options.get(
+            CONF_SEEN_INTERVAL,
+            self.config_entry.data.get(CONF_SEEN_INTERVAL, DEFAULT_SEEN_INTERVAL),
         )
         current_consider_home = self.config_entry.options.get(
             CONF_CONSIDER_HOME,
@@ -104,14 +109,11 @@ class DBusBluetoothTrackerOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_ADAPTER, self.config_entry.data.get(CONF_ADAPTER, DEFAULT_ADAPTER)
         )
 
-        # Convert MACs list to newline-separated string for user-friendly UI input
         macs_str = "\n".join(current_macs)
 
-        # Query system adapters dynamically to show as dropdown options
         scanner = DBusBluetoothScanner(self.hass)
         system_adapters = await scanner.async_list_system_adapters()
-        
-        # Build options dictionary for UI selection list
+
         adapter_options = [{"value": DEFAULT_ADAPTER, "label": f"auto ({DEFAULT_ADAPTER})"}]
         for adp in system_adapters:
             if adp != DEFAULT_ADAPTER:
@@ -130,6 +132,9 @@ class DBusBluetoothTrackerOptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 vol.Required(CONF_INTERVAL, default=current_interval): vol.All(
                     vol.Coerce(int), vol.Range(min=5)
+                ),
+                vol.Required(CONF_SEEN_INTERVAL, default=current_seen_interval): vol.All(
+                    vol.Coerce(int), vol.Range(min=0)
                 ),
                 vol.Required(
                     CONF_CONSIDER_HOME, default=current_consider_home

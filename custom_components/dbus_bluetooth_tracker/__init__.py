@@ -11,18 +11,19 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from . import scanner as scanner_module
 from .const import (
     CONF_ADAPTER,
     CONF_CONSIDER_HOME,
     CONF_DBUS_ADDRESS,
     CONF_INTERVAL,
+    CONF_SEEN_INTERVAL,
     CONF_TRACKED_MACS,
     DEFAULT_ADAPTER,
     DEFAULT_CONSIDER_HOME,
     DEFAULT_INTERVAL,
+    DEFAULT_SEEN_INTERVAL,
     DOMAIN,
     PLATFORMS,
     SCAN_NEARBY_DEVICES_SCHEMA,
@@ -70,11 +71,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     consider_home_seconds = entry.options.get(
         CONF_CONSIDER_HOME, entry.data.get(CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME)
     )
+    seen_interval_seconds = entry.options.get(
+        CONF_SEEN_INTERVAL,
+        entry.data.get(CONF_SEEN_INTERVAL, DEFAULT_SEEN_INTERVAL),
+    )
 
     _LOGGER.info(
-        "Setting up dbus_bluetooth_tracker entry with %d MACs to track. Interval: %ds, Consider home: %ds",
+        "Setting up dbus_bluetooth_tracker entry with %d MACs to track. Interval: %ds, "
+        "Seen interval: %ds, Consider home: %ds",
         len(tracked_macs),
         interval_seconds,
+        seen_interval_seconds,
         consider_home_seconds,
     )
 
@@ -87,12 +94,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 CONF_INTERVAL: interval_seconds,
                 CONF_CONSIDER_HOME: consider_home_seconds,
                 CONF_ADAPTER: selected_adapter,
+                CONF_SEEN_INTERVAL: seen_interval_seconds,
             },
         )
 
-    # We use a coordinator to periodically check device presence
+    # Keep track of when each device was last successfully seen
+    device_last_seen: dict[str, datetime] = {}
+
     async def async_update_data() -> dict[str, Any]:
-        """Fetch tracking data from D-Bus scanner."""
+        """Fetch tracking data from D-Bus scanner.
+
+        Implements the legacy `seen_interval_seconds` optimisation:
+        if a device was seen recently (within seen_interval), we skip the
+        expensive D-Bus scan for it and keep reporting it as reachable.
+        Otherwise we actively poll BlueZ for the device.
+        """
         current_tracked = clean_mac_list(
             entry.options.get(CONF_TRACKED_MACS, [])
         )
@@ -101,28 +117,65 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return {}
 
         current_adapter = entry.options.get(CONF_ADAPTER, DEFAULT_ADAPTER)
-        _LOGGER.debug(
-            "Starting periodic D-Bus bluetooth scan on adapter '%s' for: %s",
-            current_adapter,
-            current_tracked,
+        current_seen_interval = entry.options.get(
+            CONF_SEEN_INTERVAL, DEFAULT_SEEN_INTERVAL
         )
-        try:
-            polled = await scanner.poll_devices(current_tracked, adapter=current_adapter)
-            # Supplement RSSI from HA Bluetooth Integration cache if BlueZ has None
+
+        now = datetime.now()
+        results: dict[str, dict[str, Any]] = {}
+        need_scan: list[str] = []
+
+        for mac in current_tracked:
+            if current_seen_interval > 0:
+                last = device_last_seen.get(mac)
+                if last is not None:
+                    elapsed = (now - last).total_seconds()
+                    if elapsed < current_seen_interval:
+                        # Recently seen -> keep it "home" without a busy D-Bus scan
+                        results[mac] = {"reachable": True, "rssi": None, "name": None}
+                        _LOGGER.debug(
+                            "Device %s seen %0.0fs ago (< seen_interval %ds), skipping scan",
+                            mac,
+                            elapsed,
+                            current_seen_interval,
+                        )
+                        continue
+            need_scan.append(mac)
+
+        if need_scan:
+            _LOGGER.debug(
+                "Scanning %d device(s) via adapter '%s': %s",
+                len(need_scan),
+                current_adapter,
+                need_scan,
+            )
             try:
-                for info in async_discovered_service_info(hass, connectable=False):
-                    mac_key = info.address.upper()
-                    if mac_key in polled and polled[mac_key].get("rssi") is None:
-                        polled[mac_key]["rssi"] = info.rssi
-                for info in async_discovered_service_info(hass, connectable=True):
-                    mac_key = info.address.upper()
-                    if mac_key in polled and polled[mac_key].get("rssi") is None:
-                        polled[mac_key]["rssi"] = info.rssi
-            except HomeAssistantError:
-                pass
-            return polled
-        except Exception as err:
-            raise UpdateFailed(f"Error communicating with D-Bus: {err}") from err
+                polled = await scanner.poll_devices(need_scan, adapter=current_adapter)
+                for mac, data in polled.items():
+                    results[mac] = data
+                    if data.get("reachable"):
+                        device_last_seen[mac] = now
+            except Exception as err:
+                raise UpdateFailed(f"Error communicating with D-Bus: {err}") from err
+
+        # Supplement RSSI from HA Bluetooth Integration cache if BlueZ has no valid value
+        try:
+            ha_by_mac: dict[str, Any] = {}
+            for info in async_discovered_service_info(hass, connectable=False):
+                ha_by_mac[info.address.upper()] = info
+            for info in async_discovered_service_info(hass, connectable=True):
+                ha_by_mac.setdefault(info.address.upper(), info)
+
+            for mac in results:
+                info = ha_by_mac.get(mac)
+                if not info or results[mac].get("rssi") is not None:
+                    continue
+                if scanner_module._is_valid_rssi(info.rssi):
+                    results[mac]["rssi"] = info.rssi
+        except HomeAssistantError:
+            pass
+
+        return results
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -132,13 +185,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         update_interval=timedelta(seconds=interval_seconds),
     )
 
-    # Keep track of when each device was last successfully seen
-    device_last_seen: dict[str, datetime] = {}
-
     hass.data[DOMAIN][entry.entry_id] = {
         "scanner": scanner,
         "coordinator": coordinator,
         "device_last_seen": device_last_seen,
+        "tracked_macs": tracked_macs,
+        "adapter": selected_adapter,
+        "seen_interval": seen_interval_seconds,
     }
 
     # Fetch initial data
@@ -150,59 +203,76 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register the service to scan nearby devices and notify users
     async def handle_scan_service(call: ServiceCall) -> None:
         """Scan nearby bluetooth devices and show a persistent notification."""
-        _LOGGER.info("Starting a service-triggered scan for nearby bluetooth devices...")
-        
-        # 1. Gather from built-in HA bluetooth component (both connectable & non-connectable)
+        timeout = int(call.data.get("timeout", 10))
+        _LOGGER.info(
+            "Starting service-triggered scan for nearby bluetooth devices "
+            "(timeout=%ss)...",
+            timeout,
+        )
+
         devices_dict: dict[str, dict[str, Any]] = {}
         ha_bt_error: str | None = None
+
+        # 1. Gather from built-in HA bluetooth component (both connectable & non-connectable)
         try:
             discovered_ha = list(async_discovered_service_info(hass, connectable=False))
             discovered_ha_conn = list(async_discovered_service_info(hass, connectable=True))
             for info in discovered_ha + discovered_ha_conn:
                 mac = info.address.upper()
+                rssi = info.rssi if scanner_module._is_valid_rssi(info.rssi) else None
                 devices_dict[mac] = {
                     "name": info.name or "Unknown",
                     "mac": mac,
-                    "rssi": info.rssi or "Unknown",
-                    "source": "HA Bluetooth Integration",
+                    "rssi": rssi,
+                    "source": "HA Bluetooth (passive cache)",
                 }
             _LOGGER.debug(
-                "HA bluetooth cache: %d non-connectable + %d connectable devices",
+                "HA bluetooth passive cache: %d non-connectable + %d connectable devices",
                 len(discovered_ha),
                 len(discovered_ha_conn),
             )
         except HomeAssistantError as err:
             ha_bt_error = str(err)
             _LOGGER.warning(
-                "Cannot read HA bluetooth discovery cache: %s. "
-                "Is the built-in `bluetooth` integration set up?",
+                "Cannot read HA bluetooth cache: %s. Is the built-in `bluetooth` integration set up?",
                 err,
             )
-        # 2. Parallelly run D-Bus discovery scan to capture anything else
+
+        # 2. Actively scan via BlueZ D-Bus (respecting the user-provided timeout & adapter)
         current_adapter = entry.options.get(CONF_ADAPTER, DEFAULT_ADAPTER)
         try:
-            dbus_devices = await scanner.discover_nearby(timeout=5)
+            dbus_devices = await scanner.discover_nearby(
+                timeout=timeout, adapter=current_adapter
+            )
+            _LOGGER.debug(
+                "BlueZ active scan returned %d device(s) after %ss on adapter '%s'",
+                len(dbus_devices),
+                timeout,
+                current_adapter,
+            )
             for dev in dbus_devices:
                 mac = dev["mac"].upper()
                 if mac not in devices_dict:
                     devices_dict[mac] = {
                         "name": dev["name"] or "Unknown",
                         "mac": mac,
-                        "rssi": dev["rssi"] or "Unknown",
+                        "rssi": dev["rssi"],
                         "source": f"Local BlueZ ({dev['adapter']})",
                     }
                 else:
-                    # Enrich RSSI or source if needed
+                    # Prefer a real RSSI measurement over None
+                    if devices_dict[mac]["rssi"] is None and dev["rssi"] is not None:
+                        devices_dict[mac]["rssi"] = dev["rssi"]
                     if devices_dict[mac]["name"] == "Unknown" and dev["name"]:
                         devices_dict[mac]["name"] = dev["name"]
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("D-Bus discovery failed: %s", err)
+            _LOGGER.warning("BlueZ D-Bus discovery failed: %s", err)
 
         # 3. Format and send system notification
         if not devices_dict:
             diagnoses = [
-                f"- HA 蓝牙集成缓存: {'不可用 (' + ha_bt_error + ')' if ha_bt_error else '为空 (可能设备已过期，等待下次广播)'}",
-                '- D-Bus/BlueZ: 未返回设备或异常（见 Home Assistant 日志）',
+                f"- HA 蓝牙集成缓存: {'不可用 (' + ha_bt_error + ')' if ha_bt_error else '为空 (设备可能已停止广播，缓存过期)'}",
+                "- BlueZ D-Bus 主动扫描: 未返回设备或异常（见 Home Assistant 日志）",
             ]
             message = (
                 "📡 本次扫描没有在附近发现任何蓝牙设备\n\n"
@@ -214,22 +284,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             sorted_devices = sorted(
                 devices_dict.values(),
-                key=lambda x: (
-                    -1000 if x["rssi"] == "Unknown" else int(x["rssi"])
-                ),
+                key=lambda x: (x["rssi"] if isinstance(x["rssi"], (int, float)) else -1000),
                 reverse=True,
             )
-            
             message = (
                 "请复制您要追踪的 MAC 地址，并在“设置 -> 设备与服务 -> Bluetooth Tracker -> 选项”中添加：\n\n"
                 "| 设备名称 (Name) | 蓝牙 MAC 地址 (Address) | 信号强度 (RSSI) | 扫描源 (Source) |\n"
                 "| :--- | :--- | :--- | :--- |\n"
             )
             for dev in sorted_devices:
-                rssi_str = f"{dev['rssi']} dBm" if isinstance(dev['rssi'], (int, float)) else "Unknown"
+                rssi_str = f"{dev['rssi']} dBm" if isinstance(dev["rssi"], (int, float)) else "Unknown"
                 message += f"| **{dev['name']}** | `{dev['mac']}` | {rssi_str} | {dev['source']} |\n"
 
-        # Push notification
         await hass.services.async_call(
             "persistent_notification",
             "create",

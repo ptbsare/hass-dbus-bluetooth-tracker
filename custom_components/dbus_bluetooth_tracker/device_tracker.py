@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
-from typing import Any, cast
+from datetime import datetime
+from typing import Any
 
 import homeassistant.util.dt as dt_util
 from homeassistant.components.device_tracker import ScannerEntity, SourceType
@@ -19,7 +19,6 @@ from homeassistant.helpers.update_coordinator import (
 
 from .const import (
     CONF_CONSIDER_HOME,
-    CONF_INTERVAL,
     CONF_TRACKED_MACS,
     DOMAIN,
 )
@@ -42,7 +41,6 @@ async def async_setup_entry(
         CONF_CONSIDER_HOME, entry.data.get(CONF_CONSIDER_HOME, 180)
     )
 
-    # Clean MACs
     def clean_mac_list(macs: Any) -> list[str]:
         if not macs:
             return []
@@ -87,7 +85,6 @@ class DBusBluetoothTrackerEntity(CoordinatorEntity, RestoreEntity, ScannerEntity
         self._attr_name = self._mac
         self._last_seen: datetime | None = None
 
-        # Set initial state from coordinator data
         if self._mac in (coordinator.data or {}):
             device_info = coordinator.data.get(self._mac, {})
             if isinstance(device_info, dict) and device_info.get("reachable", False):
@@ -96,10 +93,7 @@ class DBusBluetoothTrackerEntity(CoordinatorEntity, RestoreEntity, ScannerEntity
     async def async_added_to_hass(self) -> None:
         """Restore previous state on startup."""
         await super().async_added_to_hass()
-
-        # Restore state if it exists
         if (last_state := await self.async_get_last_state()) is not None:
-            # If the entity had a previous state of home, consider it seen
             if last_state.state == "home":
                 self._last_seen = dt_util.utcnow()
 
@@ -127,7 +121,6 @@ class DBusBluetoothTrackerEntity(CoordinatorEntity, RestoreEntity, ScannerEntity
         if reachable:
             return True
 
-        # Check consider_home window
         if self._last_seen is not None:
             elapsed = dt_util.utcnow() - self._last_seen
             if elapsed.total_seconds() <= self._consider_home:
@@ -141,16 +134,24 @@ class DBusBluetoothTrackerEntity(CoordinatorEntity, RestoreEntity, ScannerEntity
         return self._mac
 
     @property
+    def ip_address(self) -> str | None:
+        """Return IP — not used for bluetooth."""
+        return None
+
+    @property
+    def hostname(self) -> str | None:
+        """Return hostname — not used for bluetooth."""
+        return None
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
         attrs: dict[str, Any] = {}
-        # Preserve any base-class (Flows/ScannerEntity) provided attributes
+        # Preserve any base-class (ScannerEntity) attributes like "mac"
         try:
             attrs.update(super().extra_state_attributes)
         except Exception:
             pass
-
-        attrs["mac_address"] = self._mac
 
         data = self.coordinator.data or {}
         device_info = data.get(self._mac, {})

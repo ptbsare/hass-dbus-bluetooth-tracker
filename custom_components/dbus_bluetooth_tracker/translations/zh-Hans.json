@@ -20,6 +20,7 @@
           "tracked_macs": "要追踪的蓝牙 MAC 列表（可以是用逗号分隔或每行一个）",
           "adapter": "选择要使用的本地蓝牙适配器 (例如 hci0)",
           "interval_seconds": "查询扫描时间间隔（秒）",
+          "seen_interval_seconds": "已确认在线后跳过扫描的时间（秒，0=禁用）",
           "consider_home": "离开判定延迟（秒）- 在此时间内未连通则判定为离开"
         }
       }

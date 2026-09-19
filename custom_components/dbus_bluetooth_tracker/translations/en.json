@@ -20,6 +20,7 @@
           "tracked_macs": "Tracked MAC list (comma or newline separated)",
           "adapter": "Select local bluetooth adapter (e.g. hci0)",
           "interval_seconds": "Polling scan interval (seconds)",
+          "seen_interval_seconds": "Cooldown scan skip for recently seen devices (seconds, 0=disabled)",
           "consider_home": "Consider home delay (seconds) - timeout before marked away"
         }
       }
