@@ -47,16 +47,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     scanner = DBusBluetoothScanner(hass, dbus_address=dbus_address)
 
     # Convert tracked macs string list to upper and clean whitespaces
+    import re
+    _MAC_RE = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
     def clean_mac_list(macs: Any) -> list[str]:
         if not macs:
             return []
         if isinstance(macs, str):
             macs = [macs]
         cleaned = []
-        for mac in macs:
-            cleaned_mac = mac.strip().upper()
-            if cleaned_mac:
-                cleaned.append(cleaned_mac)
+        for raw in macs:
+            matches = _MAC_RE.findall(str(raw))
+            if matches:
+                cleaned.extend(m.upper() for m in matches)
+            elif str(raw).strip():
+                cleaned.append(str(raw).strip().upper())
         return cleaned
 
     tracked_macs = clean_mac_list(

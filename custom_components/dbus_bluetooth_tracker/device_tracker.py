@@ -41,12 +41,21 @@ async def async_setup_entry(
         CONF_CONSIDER_HOME, entry.data.get(CONF_CONSIDER_HOME, 180)
     )
 
+    import re
+    _MAC_RE = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
     def clean_mac_list(macs: Any) -> list[str]:
         if not macs:
             return []
         if isinstance(macs, str):
             macs = [macs]
-        return [mac.strip().upper() for mac in macs if mac and mac.strip()]
+        cleaned = []
+        for raw in macs:
+            matches = _MAC_RE.findall(str(raw))
+            if matches:
+                cleaned.extend(m.upper() for m in matches)
+            elif str(raw).strip():
+                cleaned.append(str(raw).strip().upper())
+        return cleaned
 
     tracked_macs = clean_mac_list(tracked_macs)
 

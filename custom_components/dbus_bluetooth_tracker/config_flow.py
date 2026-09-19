@@ -74,10 +74,19 @@ class DBusBluetoothTrackerOptionsFlowHandler(config_entries.OptionsFlow):
         """Manage the options."""
         if user_input is not None:
             macs_raw = user_input.get(CONF_TRACKED_MACS, "")
+            # Step 1: split on common separators
+            parts = macs_raw.replace("\n", ",").split(",")
+            # Step 2: split each part further if multiple MACs are glued together
+            # e.g. "B8:EA:98:83:06:69FC:5B:8C:44:84:19" -> two separate MACs
+            import re
+            mac_pattern = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
             macs_list = []
-            for item in macs_raw.replace("\n", ",").split(","):
-                cleaned = item.strip().upper()
-                if cleaned:
+            for part in parts:
+                matches = mac_pattern.findall(part)
+                if matches:
+                    macs_list.extend(m.upper() for m in matches)
+                elif part.strip():
+                    cleaned = part.strip().upper()
                     macs_list.append(cleaned)
 
             return self.async_create_entry(
