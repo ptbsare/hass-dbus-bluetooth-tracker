@@ -17,11 +17,7 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
 )
 
-from .const import (
-    CONF_CONSIDER_HOME,
-    CONF_TRACKED_MACS,
-    DOMAIN,
-)
+from .const import CONF_CONSIDER_HOME, CONF_TRACKED_MACS, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,40 +27,22 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the dbus_bluetooth_tracker device tracker platform."""
     coordinator: DataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
-    tracked_macs = entry.options.get(
-        CONF_TRACKED_MACS, entry.data.get(CONF_TRACKED_MACS, [])
+    from .scanner import clean_mac_list
+
+    tracked_macs = clean_mac_list(
+        entry.options.get(CONF_TRACKED_MACS, entry.data.get(CONF_TRACKED_MACS, []))
     )
     consider_home = entry.options.get(
         CONF_CONSIDER_HOME, entry.data.get(CONF_CONSIDER_HOME, 180)
     )
-
-    import re
-    _MAC_RE = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
-    def clean_mac_list(macs: Any) -> list[str]:
-        if not macs:
-            return []
-        if isinstance(macs, str):
-            macs = [macs]
-        cleaned = []
-        for raw in macs:
-            matches = _MAC_RE.findall(str(raw))
-            if matches:
-                cleaned.extend(m.upper() for m in matches)
-            elif str(raw).strip():
-                cleaned.append(str(raw).strip().upper())
-        return cleaned
-
-    tracked_macs = clean_mac_list(tracked_macs)
 
     entities = [
         DBusBluetoothTrackerEntity(
             coordinator=coordinator,
             mac=mac,
             consider_home=consider_home,
-            entry_id=entry.entry_id,
         )
         for mac in tracked_macs
     ]
@@ -82,14 +60,10 @@ class DBusBluetoothTrackerEntity(CoordinatorEntity, RestoreEntity, ScannerEntity
         coordinator: DataUpdateCoordinator,
         mac: str,
         consider_home: int,
-        entry_id: str,
     ) -> None:
-        """Initialize the tracked device entity."""
         super().__init__(coordinator)
-
         self._mac = mac.lower()
         self._consider_home = consider_home
-        self._entry_id = entry_id
         self._attr_unique_id = self._mac
         self._attr_name = self._mac
         self._last_seen: datetime | None = None
@@ -100,7 +74,6 @@ class DBusBluetoothTrackerEntity(CoordinatorEntity, RestoreEntity, ScannerEntity
                 self._last_seen = dt_util.utcnow()
 
     async def async_added_to_hass(self) -> None:
-        """Restore previous state on startup."""
         await super().async_added_to_hass()
         if (last_state := await self.async_get_last_state()) is not None:
             if last_state.state == "home":
@@ -108,84 +81,63 @@ class DBusBluetoothTrackerEntity(CoordinatorEntity, RestoreEntity, ScannerEntity
 
     @property
     def available(self) -> bool:
-        """Return True, device trackers are always available."""
         return True
 
     @property
     def source_type(self) -> SourceType:
-        """Return the source type of the device tracker."""
         return SourceType.BLUETOOTH
 
     @property
     def is_connected(self) -> bool:
-        """Return True if the device is connected/present."""
         data = self.coordinator.data or {}
         device_info = data.get(self._mac, {})
-        reachable = False
-        if isinstance(device_info, dict):
-            reachable = device_info.get("reachable", False)
-        elif isinstance(device_info, bool):
-            reachable = device_info
-
-        if reachable:
+        if isinstance(device_info, dict) and device_info.get("reachable", False):
             return True
-
+        if isinstance(device_info, bool) and device_info:
+            return True
         if self._last_seen is not None:
-            elapsed = dt_util.utcnow() - self._last_seen
-            if elapsed.total_seconds() <= self._consider_home:
+            if (dt_util.utcnow() - self._last_seen).total_seconds() <= self._consider_home:
                 return True
-
         return False
 
     @property
     def mac_address(self) -> str:
-        """Return the MAC address of the device."""
         return self._mac
 
     @property
     def ip_address(self) -> str | None:
-        """Return IP — not used for bluetooth."""
         return None
 
     @property
     def hostname(self) -> str | None:
-        """Return hostname — not used for bluetooth."""
         return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return extra state attributes."""
         attrs: dict[str, Any] = {}
-        # Preserve any base-class (ScannerEntity) attributes like "mac"
         try:
             attrs.update(super().extra_state_attributes)
         except Exception:
             pass
-
         data = self.coordinator.data or {}
         device_info = data.get(self._mac, {})
         if isinstance(device_info, dict):
-            rssi = device_info.get("rssi")
             name = device_info.get("name")
-            if rssi is not None:
-                attrs["signal_strength"] = rssi
+            source = device_info.get("source")
             if name:
                 attrs["device_name"] = name
+            if source:
+                attrs["source"] = source
         if self._last_seen is not None:
             attrs["last_seen"] = self._last_seen.isoformat()
         return attrs
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Handle updated data from the coordinator."""
         data = self.coordinator.data or {}
         device_info = data.get(self._mac, {})
-        reachable = False
-        if isinstance(device_info, dict):
-            reachable = device_info.get("reachable", False)
-        elif isinstance(device_info, bool):
-            reachable = device_info
-
-        if reachable:
+        if isinstance(device_info, dict) and device_info.get("reachable", False):
+            self._last_seen = dt_util.utcnow()
+        elif isinstance(device_info, bool) and device_info:
             self._last_seen = dt_util.utcnow()
         self.async_write_ha_state()
