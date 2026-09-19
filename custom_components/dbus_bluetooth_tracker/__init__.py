@@ -100,15 +100,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Keep track of when each device was last successfully seen
     device_last_seen: dict[str, datetime] = {}
+    device_last_data: dict[str, dict[str, Any]] = {}
 
     async def async_update_data() -> dict[str, Any]:
-        """Fetch tracking data from D-Bus scanner.
-
-        Implements the legacy `seen_interval_seconds` optimisation:
-        if a device was seen recently (within seen_interval), we skip the
-        expensive D-Bus scan for it and keep reporting it as reachable.
-        Otherwise we actively poll BlueZ for the device.
-        """
+        """Fetch tracking data from D-Bus scanner."""
         current_tracked = clean_mac_list(
             entry.options.get(CONF_TRACKED_MACS, [])
         )
@@ -131,10 +126,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if last is not None:
                     elapsed = (now - last).total_seconds()
                     if elapsed < current_seen_interval:
-                        # Recently seen -> keep it "home" without a busy D-Bus scan
-                        results[mac] = {"reachable": True, "rssi": None, "name": None}
+                        # Keep cached result including last known RSSI and name
+                        cached = device_last_data.get(
+                            mac, {"reachable": True, "rssi": None, "name": None}
+                        )
+                        results[mac] = dict(cached)
                         _LOGGER.debug(
-                            "Device %s seen %0.0fs ago (< seen_interval %ds), skipping scan",
+                            "Device %s seen %0.0fs ago (< seen_interval %ds), using cached data",
                             mac,
                             elapsed,
                             current_seen_interval,
@@ -155,6 +153,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     results[mac] = data
                     if data.get("reachable"):
                         device_last_seen[mac] = now
+                        device_last_data[mac] = data
             except Exception as err:
                 raise UpdateFailed(f"Error communicating with D-Bus: {err}") from err
 
