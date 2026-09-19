@@ -107,7 +107,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             current_tracked,
         )
         try:
-            return await scanner.poll_devices(current_tracked, adapter=current_adapter)
+            polled = await scanner.poll_devices(current_tracked, adapter=current_adapter)
+            # Supplement RSSI from HA Bluetooth Integration cache if BlueZ has None
+            try:
+                for info in async_discovered_service_info(hass, connectable=False):
+                    mac_key = info.address.upper()
+                    if mac_key in polled and polled[mac_key].get("rssi") is None:
+                        polled[mac_key]["rssi"] = info.rssi
+                for info in async_discovered_service_info(hass, connectable=True):
+                    mac_key = info.address.upper()
+                    if mac_key in polled and polled[mac_key].get("rssi") is None:
+                        polled[mac_key]["rssi"] = info.rssi
+            except HomeAssistantError:
+                pass
+            return polled
         except Exception as err:
             raise UpdateFailed(f"Error communicating with D-Bus: {err}") from err
 

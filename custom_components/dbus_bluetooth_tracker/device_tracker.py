@@ -143,15 +143,24 @@ class DBusBluetoothTrackerEntity(CoordinatorEntity, RestoreEntity, ScannerEntity
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attrs: dict[str, Any] = {
-            "mac_address": self._mac,
-        }
+        attrs: dict[str, Any] = {}
+        # Preserve any base-class (Flows/ScannerEntity) provided attributes
+        try:
+            attrs.update(super().extra_state_attributes)
+        except Exception:
+            pass
+
+        attrs["mac_address"] = self._mac
+
         data = self.coordinator.data or {}
         device_info = data.get(self._mac, {})
         if isinstance(device_info, dict):
             rssi = device_info.get("rssi")
+            name = device_info.get("name")
             if rssi is not None:
                 attrs["signal_strength"] = rssi
+            if name:
+                attrs["device_name"] = name
         if self._last_seen is not None:
             attrs["last_seen"] = self._last_seen.isoformat()
         return attrs
