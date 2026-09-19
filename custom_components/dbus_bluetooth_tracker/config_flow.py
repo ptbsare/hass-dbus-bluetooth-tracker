@@ -128,7 +128,8 @@ class DBusBluetoothTrackerOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_ADAPTER, self.config_entry.data.get(CONF_ADAPTER, DEFAULT_ADAPTER)
         )
 
-        macs_str = "\n".join(display_macs)
+        # Single-line input field: join with commas (newlines are stripped by the HA UI)
+        macs_str = ", ".join(display_macs)
 
         scanner = DBusBluetoothScanner(self.hass)
         system_adapters = await scanner.async_list_system_adapters()
