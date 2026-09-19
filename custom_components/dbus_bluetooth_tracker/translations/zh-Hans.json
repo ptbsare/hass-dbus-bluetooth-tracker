@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "添加 D-Bus Bluetooth Tracker",
+        "description": "点击“提交”将创建 D-Bus 蓝牙追踪集成。配置完成后，你可以随时在集成“选项”中添加你想要追踪的蓝牙 MAC 地址。",
+        "data": {}
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "此集成只允许配置一次。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "配置追踪参数",
+        "description": "你可以利用开发者工具中的服务 `dbus_bluetooth_tracker.scan_nearby_devices` 来扫描附近的蓝牙设备。扫描结果会通过系统通知发出来，方便你在这里复制并粘贴 MAC 地址。\n\n请输入配置：",
+        "data": {
+          "tracked_macs": "要追踪的蓝牙 MAC 列表（可以是用逗号分隔或每行一个）",
+          "adapter": "选择要使用的本地蓝牙适配器 (例如 hci0)",
+          "interval_seconds": "查询扫描时间间隔（秒）",
+          "consider_home": "离开判定延迟（秒）- 在此时间内未连通则判定为离开"
+        }
+      }
+    }
+  }
+}

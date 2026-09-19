@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add D-Bus Bluetooth Tracker",
+        "description": "Click Submit to set up D-Bus Bluetooth Tracker integration. You can add tracked MAC addresses later inside the Integration options.",
+        "data": {}
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Only a single instance is allowed."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure Tracked Devices",
+        "description": "You can use the service `dbus_bluetooth_tracker.scan_nearby_devices` to scan and detect nearby bluetooth MACs. Results will be shown in persistent notifications.\n\nPlease enter the tracking options below:",
+        "data": {
+          "tracked_macs": "Tracked MAC list (comma or newline separated)",
+          "adapter": "Select local bluetooth adapter (e.g. hci0)",
+          "interval_seconds": "Polling scan interval (seconds)",
+          "consider_home": "Consider home delay (seconds) - timeout before marked away"
+        }
+      }
+    }
+  }
+}

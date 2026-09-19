@@ -1,0 +1,140 @@
+"""Config flow for dbus_bluetooth_tracker integration."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import voluptuous as vol
+
+from homeassistant import config_entries
+from homeassistant.core import callback
+from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import selector
+
+from .const import (
+    CONF_ADAPTER,
+    CONF_CONSIDER_HOME,
+    CONF_INTERVAL,
+    CONF_TRACKED_MACS,
+    DEFAULT_ADAPTER,
+    DEFAULT_CONSIDER_HOME,
+    DEFAULT_INTERVAL,
+    DOMAIN,
+)
+from .scanner import DBusBluetoothScanner
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class DBusBluetoothTrackerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Handle a config flow for D-Bus Bluetooth Tracker."""
+
+    VERSION = 1
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle the initial step."""
+        # Only allow a single instance of this integration
+        if self._async_current_entries():
+            return self.async_abort(reason="single_instance_allowed")
+
+        if user_input is not None:
+            return self.async_create_entry(
+                title="D-Bus Bluetooth Tracker",
+                data={},
+                options={
+                    CONF_TRACKED_MACS: [],
+                    CONF_INTERVAL: DEFAULT_INTERVAL,
+                    CONF_CONSIDER_HOME: DEFAULT_CONSIDER_HOME,
+                    CONF_ADAPTER: DEFAULT_ADAPTER,
+                },
+            )
+
+        return self.async_show_form(step_id="user")
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> DBusBluetoothTrackerOptionsFlowHandler:
+        """Get the options flow for this handler."""
+        return DBusBluetoothTrackerOptionsFlowHandler()
+
+
+class DBusBluetoothTrackerOptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle options flow for dbus_bluetooth_tracker."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manage the options."""
+        if user_input is not None:
+            # Parse the string containing MACs back into a list of strings
+            macs_raw = user_input.get(CONF_TRACKED_MACS, "")
+            macs_list = []
+            for item in macs_raw.replace("\n", ",").split(","):
+                cleaned = item.strip().upper()
+                if cleaned:
+                    macs_list.append(cleaned)
+
+            return self.async_create_entry(
+                title="",
+                data={
+                    CONF_TRACKED_MACS: macs_list,
+                    CONF_INTERVAL: user_input[CONF_INTERVAL],
+                    CONF_CONSIDER_HOME: user_input[CONF_CONSIDER_HOME],
+                    CONF_ADAPTER: user_input[CONF_ADAPTER],
+                },
+            )
+
+        # Get existing options via self.config_entry (inherited property)
+        current_macs = self.config_entry.options.get(
+            CONF_TRACKED_MACS, self.config_entry.data.get(CONF_TRACKED_MACS, [])
+        )
+        current_interval = self.config_entry.options.get(
+            CONF_INTERVAL, self.config_entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL)
+        )
+        current_consider_home = self.config_entry.options.get(
+            CONF_CONSIDER_HOME,
+            self.config_entry.data.get(CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME),
+        )
+        current_adapter = self.config_entry.options.get(
+            CONF_ADAPTER, self.config_entry.data.get(CONF_ADAPTER, DEFAULT_ADAPTER)
+        )
+
+        # Convert MACs list to newline-separated string for user-friendly UI input
+        macs_str = "\n".join(current_macs)
+
+        # Query system adapters dynamically to show as dropdown options
+        scanner = DBusBluetoothScanner(self.hass)
+        system_adapters = await scanner.async_list_system_adapters()
+        
+        # Build options dictionary for UI selection list
+        adapter_options = [{"value": DEFAULT_ADAPTER, "label": f"auto ({DEFAULT_ADAPTER})"}]
+        for adp in system_adapters:
+            if adp != DEFAULT_ADAPTER:
+                adapter_options.append({"value": adp, "label": adp})
+
+        options_schema = vol.Schema(
+            {
+                vol.Required(CONF_TRACKED_MACS, default=macs_str): str,
+                vol.Required(
+                    CONF_ADAPTER, default=current_adapter
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=adapter_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(CONF_INTERVAL, default=current_interval): vol.All(
+                    vol.Coerce(int), vol.Range(min=5)
+                ),
+                vol.Required(
+                    CONF_CONSIDER_HOME, default=current_consider_home
+                ): vol.All(vol.Coerce(int), vol.Range(min=10)),
+            }
+        )
+
+        return self.async_show_form(step_id="init", data_schema=options_schema)

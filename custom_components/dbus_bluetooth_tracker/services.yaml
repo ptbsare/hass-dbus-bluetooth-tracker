@@ -1,0 +1,14 @@
+scan_nearby_devices:
+  name: 扫描附近的蓝牙设备
+  description: 扫描周围处于活动状态的蓝牙设备，并把列表通过系统通知推送，方便复制 MAC 地址添加追踪。
+  fields:
+    timeout:
+      name: 扫描超时时间（秒）
+      description: 蓝牙主动广播搜索的持续时间（秒）。
+      required: false
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: seconds
