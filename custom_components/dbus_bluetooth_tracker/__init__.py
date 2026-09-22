@@ -165,9 +165,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except HomeAssistantError as err:
             _LOGGER.debug("Could not query HA Bluetooth cache: %s", err)
 
-        # ── Layer 2 & 3: BlueZ D-Bus ObjectManager + ConnectDevice Active Probe ──
+        # ── Layer 3: BlueZ ConnectDevice live probe (no stale ObjectManager nodes) ──
         if need_scan:
-            _LOGGER.debug("Layer 2+3: Querying BlueZ D-Bus for remaining: %s", need_scan)
+            _LOGGER.debug("Layer 3: Live ConnectDevice probe for remaining: %s", need_scan)
             try:
                 polled = await scanner.poll_devices(need_scan, adapter=current_adapter)
                 for mac, data in polled.items():

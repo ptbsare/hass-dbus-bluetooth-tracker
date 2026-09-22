@@ -107,9 +107,10 @@ class DBusBluetoothScanner:
             bus.disconnect()
             await bus.wait_for_disconnect()
 
-    # ── ConnectDevice probe (for phones / classic Bluetooth) ──────────
+    # ── ConnectDevice probe (live, always cleans up after itself) ──────
 
     async def _connect_device(self, bus: MessageBus, adapter_path: str, mac: str) -> bool:
+        """Try BlueZ ConnectDevice, return True if the device is within range."""
         device_path = f"{adapter_path}/dev_{mac.replace(':', '_')}"
         try:
             async with asyncio.timeout(CONNECT_TIMEOUT):
@@ -119,6 +120,7 @@ class DBusBluetoothScanner:
                     signature="a{sv}", body=[{"Address": Variant("s", mac)}],
                 ))
         except asyncio.TimeoutError:
+            _LOGGER.debug("ConnectDevice timeout for %s", mac)
             return False
         except Exception as err:
             _LOGGER.debug("ConnectDevice error for %s: %s", mac, err)
@@ -128,26 +130,43 @@ class DBusBluetoothScanner:
             return True
         if res.message_type == MessageType.ERROR:
             if res.error_name == f"{BLUEZ_SERVICE}.Error.AlreadyExists":
+                _LOGGER.debug("ConnectDevice already exists (in range) for %s", mac)
                 return True
+            _LOGGER.debug("ConnectDevice error for %s: %s", res.error_name, res.body)
         return False
 
-    async def _disconnect_device(self, bus: MessageBus, adapter_path: str, mac: str) -> None:
+    async def _cleanup_device(self, bus: MessageBus, adapter_path: str, mac: str) -> None:
+        """Disconnect + RemoveDevice to avoid dead D-Bus nodes lingering in BlueZ."""
         device_path = f"{adapter_path}/dev_{mac.replace(':', '_')}"
-        try:
-            await bus.call(Message(destination=BLUEZ_SERVICE, interface=DEVICE_INTERFACE, path=device_path, member="Disconnect"))
-        except Exception:
-            pass
-        try:
-            await bus.call(Message(destination=BLUEZ_SERVICE, interface=ADAPTER_INTERFACE, path=adapter_path, member="RemoveDevice", signature="o", body=[device_path]))
-        except Exception:
-            pass
 
-    # ── BlueZ ObjectManager + ConnectDevice hybrid ────────────────────
+        try:
+            res = await bus.call(Message(
+                destination=BLUEZ_SERVICE, interface=DEVICE_INTERFACE,
+                path=device_path, member="Disconnect",
+            ))
+            _LOGGER.debug("Disconnect %s -> %s", device_path, res.message_type)
+        except Exception as err:
+            _LOGGER.debug("Disconnect failed for %s: %s", device_path, err)
+
+        try:
+            res = await bus.call(Message(
+                destination=BLUEZ_SERVICE, interface=ADAPTER_INTERFACE,
+                path=adapter_path, member="RemoveDevice", signature="o",
+                body=[device_path],
+            ))
+            _LOGGER.debug("RemoveDevice %s -> %s", device_path, res.message_type)
+        except Exception as err:
+            _LOGGER.debug("RemoveDevice failed for %s: %s", device_path, err)
+
+    # ── Polling: Layer 3 only (live ConnectDevice probe + cleanup) ──────
 
     async def poll_devices(self, macs: list[str], adapter: str = DEFAULT_ADAPTER) -> dict[str, dict[str, Any]]:
-        """BlueZ Layer 2+3: ObjectManager cache + ConnectDevice probe.
+        """Probe every MAC in real time via ConnectDevice.
 
         Layer 1 (HA bluetooth cache) is handled by __init__.py.
+        This method is Layer 3 only: a live link probe; no reliance on stale
+        BlueZ ObjectManager nodes. Every probe is followed by RemoveDevice so
+        no dead D-Bus object can cause a false "home" state later.
         """
         results: dict[str, dict[str, Any]] = {
             mac.lower(): {"reachable": False, "name": None, "source": None} for mac in macs
@@ -166,49 +185,20 @@ class DBusBluetoothScanner:
             if not adapters:
                 return results
 
-            # ── Layer 2: BlueZ ObjectManager cache ──
-            try:
-                res = await bus.call(Message(destination=BLUEZ_SERVICE, path="/", interface="org.freedesktop.DBus.ObjectManager", member="GetManagedObjects"))
-                if res.message_type == MessageType.METHOD_RETURN and res.body:
-                    for path, interfaces in res.body[0].items():
-                        if DEVICE_INTERFACE not in interfaces:
-                            continue
-                        props = interfaces[DEVICE_INTERFACE]
-                        address_val = props.get("Address", "")
-                        address = address_val.value if isinstance(address_val, Variant) else address_val
-                        if not isinstance(address, str) or not address:
-                            continue
-                        key = address.lower()
-                        if key not in results:
-                            continue
-                        name_val = props.get("Name") or props.get("Alias", "")
-                        name = name_val.value if isinstance(name_val, Variant) else name_val
-                        results[key]["reachable"] = True
-                        results[key]["name"] = name or address
-                        results[key]["source"] = "BlueZ ObjectManager"
-                        _LOGGER.debug("BlueZ cache hit: %s (%s)", address, name or "unnamed")
-            except Exception as err:
-                _LOGGER.warning("GetManagedObjects failed: %s", err)
-
-            # ── Layer 3: ConnectDevice probe for unseen MACs ──
-            missing = [mac for mac in results if not results[mac]["reachable"]]
-            if missing:
-                _LOGGER.debug("Probing via ConnectDevice: %s", [m.upper() for m in missing])
-
             for adp in adapters:
                 adapter_path = f"{BLUEZ_PATH}/{adp}"
-                for mac_lower in list(missing):
-                    if results[mac_lower]["reachable"]:
-                        continue
+                for mac_lower in list(results):
                     mac_upper = mac_lower.upper()
-                    if await self._connect_device(bus, adapter_path, mac_upper):
+                    reachable = await self._connect_device(bus, adapter_path, mac_upper)
+                    if reachable:
                         results[mac_lower]["reachable"] = True
                         results[mac_lower]["name"] = mac_upper
                         results[mac_lower]["source"] = "BlueZ ConnectDevice"
                         _LOGGER.info("ConnectDevice SUCCESS: %s on %s", mac_upper, adp)
-                        await self._disconnect_device(bus, adapter_path, mac_upper)
                     else:
                         _LOGGER.debug("ConnectDevice FAILED: %s on %s", mac_upper, adp)
+                    # ALWAYS clean up the temporary node created by the probe
+                    await self._cleanup_device(bus, adapter_path, mac_upper)
 
         finally:
             bus.disconnect()
