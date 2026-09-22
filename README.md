@@ -13,11 +13,11 @@ A high-performance Home Assistant `device_tracker` integration that communicates
 
 * **Zero YAML Configuration**: Set up and manage tracked devices entirely through **Settings -> Devices & Services** in Home Assistant.
 * **Unique Entity IDs**: Every tracked device generates a proper `unique_id`, allowing you to rename, assign areas, customize icons, or group entities in the UI without warnings.
-* **Accurate Hybrid Presence Detection** (no stale-state bugs):
-  * **Layer 1 (HA Bluetooth Integration Cache)**: Zero D-Bus cost. Fast lookup matching passive BLE advertisements captured by Home Assistant.
-  * **Layer 3 (BlueZ ConnectDevice Live Probe)**: Actively sends low-level link probes to sleeping or non-advertising devices (e.g. smartphones). If the probe times out, the device is marked away.
-  * **Automatic Node Cleanup**: Every probe is followed by `Disconnect` + `RemoveDevice`, so stale BlueZ D-Bus nodes can never cause a false "home" state. This guarantees devices correctly transition to `not_home` when they leave.
-* **Seen Cooldown (`seen_interval_seconds`)**: Avoids busy D-Bus polling when devices are already marked as home, saving CPU, Bluetooth bandwidth, and phone battery.
+* **Accurate Presence Detection (no stale-cache bugs)**:
+  * **Live ConnectDevice Probe**: Every poll actively sends a low-level BlueZ link probe to each tracked device (phones, tablets, laptops). If the probe times out, the device is immediately marked `not_home`.
+  * **No reliance on stale caches**: Home Assistant's Bluetooth integration cache and BlueZ's ObjectManager history are **never** used to decide presence, because they never expire. This guarantees a device that leaves is correctly reported as away.
+  * **Automatic Node Cleanup**: Every probe is followed by `Disconnect` + `RemoveDevice`, so BlueZ D-Bus nodes created by probing never linger and cause false "home" states.
+* **Seen Cooldown (`seen_interval_seconds`)**: After a device is confirmed home, further probes are skipped for the cooldown window, saving CPU, Bluetooth bandwidth, and phone battery—while still guaranteeing accurate away detection.
 * **Multi-Adapter Support**: Automatically discovers all local Bluetooth controllers (`hci0`, `hci1`, etc.) and lets you select a specific adapter or auto-select all.
 * **Nearby Scan Service**: Includes the `dbus_bluetooth_tracker.scan_nearby_devices` service to scan nearby devices and present a Markdown table in system notifications for easy MAC address copying.
 
