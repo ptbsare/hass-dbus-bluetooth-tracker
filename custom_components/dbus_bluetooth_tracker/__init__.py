@@ -137,47 +137,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not need_scan:
             return results
 
-        # ── Layer 1: HA passive Bluetooth integration cache ──
-        _LOGGER.debug("Layer 1: Querying HA Bluetooth integration cache for: %s", need_scan)
+        # ── Layer 3: BlueZ ConnectDevice live probe ONLY ──
+        # (Layer 1 HA cache is NOT used for presence determination — it never expires)
+        _LOGGER.debug(
+            "Layer 3: Live ConnectDevice probe for: %s",
+            need_scan,
+        )
         try:
-            ha_devices: dict[str, Any] = {}
-            for info in async_discovered_service_info(hass, connectable=False):
-                ha_devices[info.address.upper()] = info
-            for info in async_discovered_service_info(hass, connectable=True):
-                ha_devices.setdefault(info.address.upper(), info)
-
-            for mac in list(need_scan):
-                info = ha_devices.get(mac)
-                if info:
-                    results[mac] = {
-                        "reachable": True,
-                        "name": info.name or mac,
-                        "source": "HA Bluetooth Integration",
-                    }
+            polled = await scanner.poll_devices(need_scan, adapter=current_adapter)
+            for mac, data in polled.items():
+                if data.get("reachable"):
+                    results[mac] = data
                     device_last_seen[mac] = now
-                    device_last_data[mac] = results[mac]
-                    need_scan.remove(mac)
+                    device_last_data[mac] = data
                     _LOGGER.info(
-                        "Layer 1 SUCCESS: Device %s found in HA Bluetooth cache (%s)",
-                        mac,
-                        info.name or "unnamed",
+                        "Device %s reached via ConnectDevice on %s",
+                        mac, current_adapter,
                     )
-        except HomeAssistantError as err:
-            _LOGGER.debug("Could not query HA Bluetooth cache: %s", err)
-
-        # ── Layer 3: BlueZ ConnectDevice live probe (no stale ObjectManager nodes) ──
-        if need_scan:
-            _LOGGER.debug("Layer 3: Live ConnectDevice probe for remaining: %s", need_scan)
-            try:
-                polled = await scanner.poll_devices(need_scan, adapter=current_adapter)
-                for mac, data in polled.items():
-                    if data.get("reachable"):
-                        results[mac] = data
-                        device_last_seen[mac] = now
-                        device_last_data[mac] = data
-            except Exception as err:
-                raise UpdateFailed(f"Error communicating with D-Bus: {err}") from err
-
+                else:
+                    _LOGGER.debug("Device %s NOT reached via ConnectDevice", mac)
+        except Exception as err:
+            raise UpdateFailed(f"Error communicating with D-Bus: {err}") from err
         return results
 
     coordinator = DataUpdateCoordinator(
